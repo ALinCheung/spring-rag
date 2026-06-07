@@ -1,0 +1,296 @@
+# =============================================================================
+# Spring Boot + Maven + Java 17 RAG 项目 .gitignore
+# 适用: Spring Boot 3.3.5 / ONNX Runtime / 本地 BGE 嵌入模型
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 一、Java 编译产物
+# -----------------------------------------------------------------------------
+*.class
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+*.dll
+*.so
+*.dylib
+
+# 崩溃日志
+hs_err_pid*
+replay_pid*
+*.hprof
+
+# -----------------------------------------------------------------------------
+# 二、Maven 构建输出与配置
+# -----------------------------------------------------------------------------
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.flattened-pom.xml
+
+# Maven Wrapper 自身 (Maven 官方建议纳入版本控制，忽略本地用户 wrapper 配置)
+# 取消下面两行注释以忽略 wrapper
+# .mvn/wrapper/maven-wrapper.jar
+# .mvn/wrapper/MavenWrapperDownloader.properties
+
+# -----------------------------------------------------------------------------
+# 三、IDE - IntelliJ IDEA
+# -----------------------------------------------------------------------------
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+.idea_modules/
+
+# -----------------------------------------------------------------------------
+# 四、IDE - Eclipse / Spring Tool Suite
+# -----------------------------------------------------------------------------
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings/
+.springBeans
+.sts4-cache
+bin/
+.loadpath
+.recommenders
+
+# -----------------------------------------------------------------------------
+# 五、IDE - VS Code
+# -----------------------------------------------------------------------------
+.vscode/
+*.code-workspace
+.history/
+
+# -----------------------------------------------------------------------------
+# 六、IDE - NetBeans
+# -----------------------------------------------------------------------------
+nbproject/private/
+nbbuild/
+nbdist/
+.nb-gradle/
+
+# -----------------------------------------------------------------------------
+# 七、日志文件
+# -----------------------------------------------------------------------------
+*.log
+logs/
+spring.log
+spring-boot-logging.log
+hs_err_pid*.log
+
+# -----------------------------------------------------------------------------
+# 八、临时文件 / 系统文件
+# -----------------------------------------------------------------------------
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+ehthumbs_vista.db
+.Trashes
+.Spotlight-V100
+.fseventsd
+
+# -----------------------------------------------------------------------------
+# 九、环境配置 / 敏感信息 (绝对不能提交)
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+
+# Spring Boot 本地配置 (local / dev / prod profile)
+application-local.yml
+application-local.properties
+application-dev.yml
+application-dev.properties
+application-prod.yml
+application-prod.properties
+application-*-local.yml
+application-*-local.properties
+
+# 密钥 / 证书 / Keystore
+*.pem
+*.key
+*.p12
+*.pfx
+keystore.jks
+truststore.jks
+.jks
+.p12
+
+# -----------------------------------------------------------------------------
+# 十、用户上传文件 / RAG 文档数据
+# -----------------------------------------------------------------------------
+# Spring Boot MultipartFile 默认上传目录
+uploads/
+upload/
+data/uploads/
+file-uploads/
+
+# RAG 文档原始数据 (按需开启: 取消下面注释以忽略文档原文)
+# documents/
+# raw-docs/
+# corpus/
+
+# 索引/向量持久化目录 (如果写入本地磁盘)
+# index/
+# vector-index/
+# faiss-index/
+# chroma-data/
+# milvus-data/
+
+# -----------------------------------------------------------------------------
+# 十一、缓存目录
+# -----------------------------------------------------------------------------
+.cache/
+*.cache
+.cache-loader/
+.eslintcache
+.stylelintcache
+
+# -----------------------------------------------------------------------------
+# 十二、测试 / 覆盖率报告
+# -----------------------------------------------------------------------------
+target/surefire-reports/
+target/failsafe-reports/
+test-output/
+test-results/
+
+# 代码覆盖率
+*.coverage
+.coverage
+htmlcov/
+coverage/
+coverage.xml
+*.lcov
+.jacoco/
+.nyc_output/
+
+# Mutation Testing
+mutator-output/
+
+# -----------------------------------------------------------------------------
+# 十三、API 文档生成
+# -----------------------------------------------------------------------------
+doc/
+docs/_build/
+site/
+swagger-ui/
+openapi-spec/
+
+# -----------------------------------------------------------------------------
+# 十四、ONNX / ML 模型 (大文件必须忽略)
+# -----------------------------------------------------------------------------
+# 原始 ONNX 模型文件通常很大 (几百MB)，不应进入 Git
+# 推荐: 启动时自动下载到本地 /models 目录，或用 Git LFS / DVC 管理
+*.onnx
+*.onnx_data
+models/
+model-store/
+checkpoints/
+*.pt
+*.pth
+*.pkl
+*.h5
+*.safetensors
+*.bin
+*.gguf
+
+# 注: tokenizer.json / config.json / vocab.txt 等小配置可保留
+# 若你的 repo 中需要跟踪部分小模型文件，请用 ! 取消忽略
+# !tokenizer.json
+# !vocab.txt
+# !special_tokens_map.json
+
+# -----------------------------------------------------------------------------
+# 十五、数据库 / 持久化文件
+# -----------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.h2.db
+data/db/
+data/*.db
+
+# -----------------------------------------------------------------------------
+# 十六、Spring Boot DevTools
+# -----------------------------------------------------------------------------
+spring-boot-devtools.properties
+.spring-boot-devtools.properties
+
+# -----------------------------------------------------------------------------
+# 十七、Node (如项目含前端 / Swagger UI 自定义构建)
+# -----------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-debug.log*
+.next/
+.nuxt/
+dist/
+.parcel-cache/
+.webpack/
+.turbo/
+
+# -----------------------------------------------------------------------------
+# 十八、Python (若有 ML 脚本/评测代码)
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+.python-version
+pip-log.txt
+pip-delete-this-directory.txt
+
+# -----------------------------------------------------------------------------
+# 十九、Docker / 部署产物
+# -----------------------------------------------------------------------------
+Dockerfile.local
+docker-compose.local.yml
+docker-compose.override.yml
+*.tar
+*.tar.gz
+
+# -----------------------------------------------------------------------------
+# 二十、其他
+# -----------------------------------------------------------------------------
+# 跟踪文件保留示例 (如需强制保留某个被忽略的文件):
+# !keep-this-file.txt
+
+# Java Mission Control / JFR
+*.jfr
+
+# JUnit / Surefire 输出
+TEST-*.xml
+
+# -----------------------------------------------------------------------------
+# 二十一、测试数据集 (真实数据库导出，敏感)
+# -----------------------------------------------------------------------------
+test-data/**
