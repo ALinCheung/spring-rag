@@ -20,14 +20,28 @@ spring:
     resources:
       add-mappings: false
 
-# Custom config
+# 自定义配置
 rag:
   model:
-    # 模型目录（与本项目绑定，相对路径指向 src/main/resources/model 下）
-    path: src/main/resources/model/bge-small-zh-v1.5
+    # 模型目录，默认从 classpath 加载（resources/model/bge-small-zh-v1.5）。
+    # 切换为外部模型时，把该项改为绝对路径即可，例如：
+    #   /opt/models/bge-small-zh-v1.5
+    # 注意：目录中必须同时包含 model.onnx 与 tokenizer.json。
+    path: classpath:model/bge-small-zh-v1.5
   chunk:
     size: 200
     overlap: 30
+  docs:
+    # 原始文档存放目录：上传的文件落地此处，启动/定时任务也从此处读取。
+    # 默认项目根目录下的 docs/data-raw；切换为外部目录时改为绝对路径。
+    path: docs/data-raw
+    # 定时全量同步 cron 表达式（Spring 6 段格式：秒 分 时 日 月 周）。
+    # 默认每小时整点一次。设为空字符串可关闭定时同步。
+    sync-cron: "0 0 * * * *"
+    # 项目启动后是否立即执行一次全量同步。
+    sync-on-startup: true
+    # 单文档最大字节数（超出将跳过并在日志中告警）。
+    max-file-size: 20971520
 
 logging:
   level:

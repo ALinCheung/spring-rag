@@ -1,0 +1,7 @@
+id,name,name_zh,category,description,description_zh
+1,Effective Java,Effective Java（中文版）,book,Best practices for Java platform programming including concurrency, generics, enums, and annotations. A must-read for senior Java engineers.,面向 Java 平台编程的最佳实践书籍，覆盖并发、泛型、枚举与注解等主题，是 Java 资深工程师的必读经典。
+2,Designing Data-Intensive Applications,数据密集型应用系统设计,book,The big ideas behind reliable, scalable, and maintainable systems. Covers databases, message queues, stream processing, and distributed systems in depth.,讲解可靠、可扩展与可维护系统背后的大思路，深入剖析数据库、消息队列、流处理与分布式系统。
+3,Clean Code,代码整洁之道,book,A handbook of agile software craftsmanship. Teaches how to write code that is readable, reusable, and refactor-friendly.,敏捷软件工艺手册，讲解如何编写可读、可复用、易重构的代码。
+4,Domain-Driven Design,领域驱动设计精粹,book,Distills the core ideas of DDD: bounded contexts, aggregates, domain events, and ubiquitous language. Recommended for backend architects.,提炼 DDD 核心思想：限界上下文、聚合、领域事件与统一语言，推荐后端架构师阅读。
+5,Sprint,决战最速产品,book,How Google, Slack and small startups validate ideas through five-day sprints. A practical guide to rapid product validation.,介绍 Google、Slack 等团队如何用五天冲刺验证想法，是产品快速验证的实战指南。
+6,Atomic Habits,掌控习惯,book,A proven framework for improving every day by stacking tiny habits. James Clear's worldwide bestseller.,通过叠加微小习惯来持续改善的成熟框架，詹姆斯·克利尔的全球畅销书。

@@ -8,34 +8,45 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 /**
- * Loads a HuggingFace BGE-style encoder that has been exported to ONNX
- * (model.onnx + tokenizer.json in the same folder) and runs it via ONNX Runtime.
+ * 加载 HuggingFace BGE 系列 ONNX 编码器（model.onnx + tokenizer.json）并通过 ONNX Runtime 推理。
  *
- * Expected ONNX I/O for sentence-transformers (bge-small-zh-v1.5):
- *   inputs  : input_ids (int64 [B,T]), attention_mask (int64 [B,T])
- *   outputs : last_hidden_state (float32 [B,T,H])   -> we mean-pool ourselves
+ * 路径解析规则（由 {@link RagProperties#model} 配置）：
+ *  - 以 {@code classpath:} 开头：把 classpath 下的模型目录完整复制到临时目录后加载，
+ *    用于解决 Spring Boot fat jar 内资源无法直接喂给 ONNX Runtime 的问题。
+ *  - 否则视为文件系统路径（绝对或相对路径均可）。
  *
- * The mean pooling mirrors the 1_Pooling/config.json used by sentence-transformers
- * (mean pooling, attention-mask aware). L2-normalisation is applied so cosine
- * similarity equals dot-product — handy for nearest-neighbour search.
+ * 启动校验：path 非空、model.onnx 与 tokenizer.json 必须存在且为普通文件。
  */
 @Service
 public class OnnxBgeEmbeddingService {
 
     private static final Logger log = LoggerFactory.getLogger(OnnxBgeEmbeddingService.class);
 
+    private static final String CLASSPATH_PREFIX = "classpath:";
+    private static final String MODEL_FILE = "model.onnx";
+    private static final String TOKENIZER_FILE = "tokenizer.json";
+
     private final RagProperties props;
     private OrtEnvironment env;
     private OrtSession session;
     private HuggingFaceTokenizer tokenizer;
+    /** classpath 模式下生成的临时目录；关闭时清理。 */
+    private Path tempModelDir;
 
     public OnnxBgeEmbeddingService(RagProperties props) {
         this.props = props;
@@ -43,15 +54,15 @@ public class OnnxBgeEmbeddingService {
 
     @PostConstruct
     public void init() throws Exception {
-        String modelDir = props.getModel().getPath();
+        Path modelDir = resolveModelDir();
+        Path modelFile = modelDir.resolve(MODEL_FILE);
+        Path tokenizerFile = modelDir.resolve(TOKENIZER_FILE);
+        validateRequiredFiles(modelDir, modelFile, tokenizerFile);
+
         log.info("Loading ONNX model from {}", modelDir);
-
-        Path modelFile = Path.of(modelDir, "model.onnx");
-        Path tokenizerFile = Path.of(modelDir, "tokenizer.json");
-
         env = OrtEnvironment.getEnvironment();
         OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
-        opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
+        opts.setOptimizationLevel(ortSessionOptLevel());
         session = env.createSession(modelFile.toString(), opts);
         tokenizer = HuggingFaceTokenizer.newInstance(tokenizerFile);
 
@@ -61,8 +72,113 @@ public class OnnxBgeEmbeddingService {
 
     @PreDestroy
     public void close() throws Exception {
-        if (session != null) session.close();
-        if (env != null) env.close();
+        try {
+            if (session != null) {
+                session.close();
+                session = null;
+            }
+        } finally {
+            if (env != null) {
+                env.close();
+                env = null;
+            }
+            if (tempModelDir != null) {
+                deleteRecursively(tempModelDir);
+                tempModelDir = null;
+            }
+        }
+    }
+
+    /**
+     * 解析模型目录。
+     * classpath: 模式会把整个目录复制到临时目录并返回临时目录路径。
+     */
+    private Path resolveModelDir() throws IOException {
+        String rawPath = props.getModel().getPath();
+        if (rawPath == null || rawPath.isBlank()) {
+            throw new IllegalStateException(
+                    "rag.model.path 未配置，请在 application.yml 中设置 rag.model.path");
+        }
+        String trimmed = rawPath.trim();
+        if (trimmed.startsWith(CLASSPATH_PREFIX)) {
+            String resourcePath = trimmed.substring(CLASSPATH_PREFIX.length()).replaceAll("/+$", "");
+            if (resourcePath.isEmpty()) {
+                throw new IllegalStateException(
+                        "classpath: 后必须指定资源路径，例如 classpath:model/bge-small-zh-v1.5");
+            }
+            return copyClasspathDirToTemp(resourcePath);
+        }
+        Path p = Path.of(trimmed);
+        if (!Files.exists(p)) {
+            throw new IllegalStateException("模型目录不存在: " + p);
+        }
+        if (!Files.isDirectory(p)) {
+            throw new IllegalStateException("rag.model.path 指向的不是目录: " + p);
+        }
+        return p;
+    }
+
+    private Path copyClasspathDirToTemp(String resourcePath) throws IOException {
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        Resource[] resources;
+        try {
+            resources = resolver.getResources(
+                    ResourceLoader.CLASSPATH_URL_PREFIX + resourcePath + "/**");
+        } catch (IOException e) {
+            throw new IllegalStateException("classpath 下未找到模型目录: " + resourcePath, e);
+        }
+        if (resources == null || resources.length == 0) {
+            throw new IllegalStateException("classpath 下未找到模型目录: " + resourcePath);
+        }
+        Path tmp = Files.createTempDirectory("rag-model-");
+        boolean copied = false;
+        for (Resource r : resources) {
+            if (!r.isReadable() || r.getFilename() == null) continue;
+            String name = r.getFilename();
+            // 跳过目录型条目
+            if (name.endsWith("/")) continue;
+            Path target = tmp.resolve(name);
+            try (InputStream in = r.getInputStream()) {
+                Files.copy(in, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            copied = true;
+        }
+        if (!copied) {
+            deleteRecursively(tmp);
+            throw new IllegalStateException("classpath 模型目录为空: " + resourcePath);
+        }
+        this.tempModelDir = tmp;
+        log.info("Copied classpath model '{}' to temp dir {}", resourcePath, tmp);
+        return tmp;
+    }
+
+    private void validateRequiredFiles(Path modelDir, Path modelFile, Path tokenizerFile) {
+        if (!Files.isRegularFile(modelFile)) {
+            throw new IllegalStateException("缺少模型文件: " + modelFile
+                    + " (expected: " + modelDir + "/" + MODEL_FILE + ")");
+        }
+        if (!Files.isRegularFile(tokenizerFile)) {
+            throw new IllegalStateException("缺少 tokenizer 文件: " + tokenizerFile
+                    + " (expected: " + modelDir + "/" + TOKENIZER_FILE + ")");
+        }
+    }
+
+    private static void deleteRecursively(Path dir) {
+        if (dir == null || !Files.exists(dir)) return;
+        try (Stream<Path> stream = Files.walk(dir)) {
+            stream.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException ignored) {
+                }
+            });
+        } catch (IOException ignored) {
+        }
+    }
+
+    /** 抽成方法避免在 init() 中直接 new 内部类造成 IDE 误报。 */
+    private static OrtSession.SessionOptions.OptLevel ortSessionOptLevel() {
+        return OrtSession.SessionOptions.OptLevel.ALL_OPT;
     }
 
     public float[] embed(String text) throws Exception {
@@ -91,10 +207,8 @@ public class OnnxBgeEmbeddingService {
         try (OrtSession.Result result = session.run(feeds)) {
             OnnxValue lastHidden = result.get(0);
             Object raw = lastHidden.getValue();
-            // ORT-Java returns the last_hidden_state tensor as a flat float[]
-            // laid out in row-major order [B, T, H]. We reshape to [B][T][H].
-            int hiddenSize = 0;
-            int outSeqLen = 0;
+            int hiddenSize;
+            int outSeqLen;
             float[] flat;
             float[][][] hidden;
             if (raw instanceof float[][][]) {
@@ -103,7 +217,6 @@ public class OnnxBgeEmbeddingService {
                 hiddenSize = hidden[0][0].length;
                 flat = null;
             } else if (raw instanceof float[][]) {
-                // Some exports collapse the batch dim when batch=1 -> [T, H]
                 float[][] twoD = (float[][]) raw;
                 outSeqLen = twoD.length;
                 hiddenSize = twoD[0].length;
@@ -114,11 +227,6 @@ public class OnnxBgeEmbeddingService {
                 hidden = null;
             } else {
                 flat = (float[]) raw;
-                // We need T and H to interpret the flat buffer. Probe the
-                // session output metadata once via session.getOutputInfo()
-                // (already done in init()), but here we keep things local:
-                // assume the export uses dynamic axes so T == input seqLen,
-                // and H == flat.length / T.
                 outSeqLen = seqLen;
                 if (outSeqLen <= 0) {
                     hiddenSize = 0;
@@ -126,7 +234,6 @@ public class OnnxBgeEmbeddingService {
                     hiddenSize = flat.length / outSeqLen;
                 }
                 if (hiddenSize <= 0 && flat.length > 0) {
-                    // Last-resort: try 384 (bge-small) then 768 (bge-base)
                     for (int guess : new int[]{384, 512, 768, 1024}) {
                         if (flat.length % guess == 0) {
                             hiddenSize = guess;
@@ -138,7 +245,6 @@ public class OnnxBgeEmbeddingService {
                 hidden = null;
             }
 
-            // Attention-mask aware mean pooling
             float[] sum = new float[hiddenSize];
             float weightSum = 0f;
             for (int t = 0; t < outSeqLen; t++) {
@@ -159,7 +265,6 @@ public class OnnxBgeEmbeddingService {
             if (weightSum == 0f) weightSum = 1f;
             for (int h = 0; h < hiddenSize; h++) sum[h] /= weightSum;
 
-            // L2 normalise
             double norm = 0;
             for (float v : sum) norm += v * v;
             norm = Math.sqrt(norm);
@@ -170,11 +275,10 @@ public class OnnxBgeEmbeddingService {
     }
 
     public int dimension() throws Exception {
-        // Derive from a probe embedding
         return embed("probe").length;
     }
 
-    /** Test helper. */
+    /** 测试辅助。 */
     List<String> tokenizeForDebug(String text) {
         return tokenizer.tokenize(text);
     }

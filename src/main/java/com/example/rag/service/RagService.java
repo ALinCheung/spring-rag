@@ -1,6 +1,11 @@
 package com.example.rag.service;
 
 import com.example.rag.embedding.OnnxBgeEmbeddingService;
+import com.example.rag.exception.DocumentConflictException;
+import com.example.rag.exception.DocumentNotFoundException;
+import com.example.rag.index.DocumentIndex;
+import com.example.rag.model.Document;
+import com.example.rag.store.DocumentRepository;
 import com.example.rag.store.VectorStore;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
@@ -10,9 +15,16 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -21,15 +33,11 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * 业务编排：负责把上传文件（文本/CSV）转成向量入库，以及按列返回相似度匹配结果。
- *
- * 设计要点（通用化）：
- * 1. 上传时由调用方声明 `columns`（CSV 哪些列作为结构化元数据 & 拼入嵌入文本）。
- *    代码不识别任何具体业务字段名，所有列名按
- *    上传时的 `columns` 列表动态处理。
- * 2. `columns` 列表之外的 CSV 列被忽略。
- * 3. 检索时由调用方再次声明 `columns`，响应里每个 match 只包含这些列的键值对。
- * 4. 文本上传路径保持不变（`columns=[]` 时走老路）。
+ * 业务编排：
+ *  - {@link #ingest(MultipartFile, List)}：上传文件落盘 + 向量化入库
+ *  - {@link #syncAll()}：扫描文档目录，全量覆盖当前内存向量
+ *  - {@link #deleteDocument(String)}：按 docId 删向量 + 删原始文件
+ *  - {@link #search} / {@link #match}：检索
  */
 @Service
 public class RagService {
@@ -39,49 +47,127 @@ public class RagService {
     private final OnnxBgeEmbeddingService embedder;
     private final TextChunker chunker;
     private final VectorStore store;
+    private final DocumentRepository docRepo;
+    private final DocumentIndex documentIndex;
 
-    public RagService(OnnxBgeEmbeddingService embedder, TextChunker chunker, VectorStore store) {
+    public RagService(OnnxBgeEmbeddingService embedder, TextChunker chunker,
+                      VectorStore store, DocumentRepository docRepo, DocumentIndex documentIndex) {
         this.embedder = embedder;
         this.chunker = chunker;
         this.store = store;
+        this.docRepo = docRepo;
+        this.documentIndex = documentIndex;
+    }
+
+    // ----- 入库 -----
+
+    /**
+     * 通用化入库入口。上传的文件会先落到 rag.docs.path，再向量化入库。
+     *
+     * @param file    上传的文件（必传，非空）
+     * @param columns CSV 模式下声明要入库的列（逗号分隔，列名必须出现在 CSV header 中）。
+     *                文本文件忽略此参数。
+     * @param name    显式指定的文档名称（可选）。非空时会用作 {@code Document.filename}，并校验
+     *                与现有文档名称不重复。{@code null}/空白时回退到上传文件的原始文件名（不做去重）。
+     */
+    public IngestResult ingest(MultipartFile file, List<String> columns, String name) throws Exception {
+        if (file == null || file.isEmpty()) {
+            throw new IllegalArgumentException("file is required and must not be empty");
+        }
+        String original = file.getOriginalFilename();
+        if (original == null || original.isBlank()) {
+            throw new IllegalArgumentException("file must have a valid filename");
+        }
+        String docName = resolveDocName(name, original);
+        // 使用 documentIndex 检查文档名称是否重复
+        if (name != null && !name.trim().isEmpty() && documentIndex.existsByDocName(docName)) {
+            throw new DocumentConflictException(docName);
+        }
+        DocumentRepository.StoredFile stored = docRepo.save(file);
+        byte[] bytes = Files.readAllBytes(stored.path());
+        return ingestFromBytes(stored.storedName(), docName, bytes, columns, /*syncMode=*/ false);
+    }
+
+    /** 兼容旧调用方：未指定 name，等价于 ingest(file, columns, null)。 */
+    public IngestResult ingest(MultipartFile file, List<String> columns) throws Exception {
+        return ingest(file, columns, null);
+    }
+
+    /** 兼容旧调用方（文本路径），等价于 ingest(file, Collections.emptyList(), null)。 */
+    public IngestResult ingest(MultipartFile file) throws Exception {
+        return ingest(file, Collections.emptyList(), null);
     }
 
     /**
-     * 通用化入库入口。`columns` 列表中每个名字必须与 CSV header 中某列名一致；
-     * 对非 CSV 文件该参数被忽略。
+     * 决定最终写入 {@code Document.filename} 的名称：
+     *  - 显式传入的 name：trim 后非空才使用，防止路径穿越。
+     *  - 未传或空白：回退到上传文件的原始文件名。
      */
-    public IngestResult ingest(MultipartFile file, List<String> columns) throws Exception {
+    private String resolveDocName(String name, String original) {
+        if (name == null) return original;
+        String trimmed = name.trim();
+        if (trimmed.isEmpty()) return original;
+        // 防路径穿越：只取 basename 部分
+        return Paths.get(trimmed).getFileName().toString();
+    }
+
+    /**
+     * 把字节内容向量化入库。
+     *
+     * @param storedName 落盘后的文件名（带 UUID 前缀）；同步模式下与 originalName 相同
+     * @param originalName 用户可见的原始文件名（用于 Document.filename）
+     * @param bytes      文件内容
+     * @param columns    CSV 模式下声明的列；同步模式下传空列表，CSV 走文本路径
+     * @param syncMode   是否同步模式：true 时无论后缀都按文本处理
+     */
+    private IngestResult ingestFromBytes(String storedName, String originalName, byte[] bytes,
+                                         List<String> columns, boolean syncMode) throws Exception {
+        long startNs = System.nanoTime();
         String docId = store.newId();
-        String original = file.getOriginalFilename() == null ? "upload.bin" : file.getOriginalFilename();
         List<VectorStore.Entry> entries = new ArrayList<>();
         int produced;
-        if (looksLikeCsv(original)) {
-            produced = ingestCsv(file, docId, entries, columns);
+        boolean csv = !syncMode && looksLikeCsv(originalName);
+        if (csv) {
+            produced = ingestCsvBytes(bytes, docId, entries, columns);
         } else {
-            produced = ingestText(file, docId, entries);
+            produced = ingestTextBytes(bytes, docId, entries);
         }
-        store.addAll(entries);
-        log.info("Ingested file={} kind={} columns={} produced={} totalVectors={}",
-                original, looksLikeCsv(original) ? "csv" : "text",
-                columns == null ? 0 : columns.size(), produced, store.size());
-        return new IngestResult(docId, original, produced, store.size());
+        String storagePath = docRepo.isClasspath()
+                ? "classpath:" + docRepo.getClasspathRoot() + "/" + storedName
+                : docRepo.getFsRoot().resolve(storedName).toString();
+        Document doc = new Document(docId, originalName, storagePath,
+                bytes.length, produced, Instant.now());
+        store.addDocument(doc, entries);
+        // 更新文档索引（非同步模式）
+        if (!syncMode) {
+            documentIndex.add(docId, originalName, storedName, bytes.length, produced);
+        }
+        long durationMs = (System.nanoTime() - startNs) / 1_000_000L;
+        log.info("Ingested docId={} name='{}' kind={} bytes={} chunks={} totalVectors={} duration={}ms",
+                docId, originalName, csv ? "csv" : "text", bytes.length,
+                produced, store.size(), durationMs);
+        return new IngestResult(docId, originalName, produced, store.size(), durationMs);
     }
 
-    /** 兼容旧调用方（文本路径），等价于 ingest(file, Collections.emptyList())。 */
-    public IngestResult ingest(MultipartFile file) throws Exception {
-        return ingest(file, Collections.emptyList());
+    private int ingestTextBytes(byte[] bytes, String docId,
+                                List<VectorStore.Entry> entries) throws Exception {
+        String text = new String(bytes, StandardCharsets.UTF_8);
+        List<String> chunks = chunker.split(text);
+        for (String chunk : chunks) {
+            float[] vec = embedder.embed(chunk);
+            entries.add(new VectorStore.Entry(store.newId(), docId, chunk, vec, Collections.emptyMap()));
+        }
+        return chunks.size();
     }
 
-    private int ingestCsv(MultipartFile file, String docId,
-                          List<VectorStore.Entry> entries, List<String> columns) throws Exception {
+    private int ingestCsvBytes(byte[] bytes, String docId,
+                               List<VectorStore.Entry> entries, List<String> columns) throws Exception {
         if (columns == null || columns.isEmpty()) {
             throw new IllegalArgumentException(
                     "CSV ingest requires `columns` to be non-empty (caller must declare which CSV columns to ingest).");
         }
-        // 用 BufferedReader 包装：支持 mark/reset，便于剥离 UTF-8 BOM
-        try (java.io.BufferedReader br = new java.io.BufferedReader(
-                new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8));
-             // 探测并跳过 UTF-8 BOM（如果存在）
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(new ByteArrayInputStream(bytes), StandardCharsets.UTF_8));
              Reader bomStripped = skipUtf8Bom(br);
              CSVParser parser = CSVFormat.DEFAULT.builder()
                      .setHeader()
@@ -92,7 +178,6 @@ public class RagService {
                      .build()
                      .parse(bomStripped)) {
 
-            // 校验 columns 列表中的每个名字都在 header 中
             List<String> headerNames = parser.getHeaderNames();
             for (String col : columns) {
                 if (!headerNames.contains(col)) {
@@ -108,7 +193,6 @@ public class RagService {
                     String v = rec.isMapped(col) ? rec.get(col) : null;
                     cols.put(col, v == null ? "" : v);
                 }
-                // 嵌入文本：按 columns 列表顺序拼接 "key: value"
                 StringBuilder sb = new StringBuilder();
                 for (String col : columns) {
                     if (sb.length() > 0) sb.append('\n');
@@ -123,11 +207,8 @@ public class RagService {
         }
     }
 
-    /**
-     * 如果 BufferedReader 第一个字符是 U+FEFF（UTF-8 BOM），跳过它；
-     * 否则把字符 push 回原位。
-     */
-    private static Reader skipUtf8Bom(java.io.BufferedReader br) throws java.io.IOException {
+    /** 跳过 UTF-8 BOM。 */
+    private static Reader skipUtf8Bom(BufferedReader br) throws IOException {
         br.mark(1);
         int c = br.read();
         if (c != 0xFEFF) {
@@ -136,28 +217,125 @@ public class RagService {
         return br;
     }
 
-    private int ingestText(MultipartFile file, String docId,
-                           List<VectorStore.Entry> entries) throws Exception {
-        byte[] bytes = file.getBytes();
-        String text = new String(bytes, StandardCharsets.UTF_8);
-        List<String> chunks = chunker.split(text);
-        for (String chunk : chunks) {
-            float[] vec = embedder.embed(chunk);
-            // 文本路径不携带 columns
-            entries.add(new VectorStore.Entry(store.newId(), docId, chunk, vec, Collections.emptyMap()));
-        }
-        return chunks.size();
-    }
+    // ----- 同步 -----
 
     /**
-     * 通用化检索。`columns` 必须非空：响应里每个 match 包含这些列的键值对。
-     * 内部按 columns 内容拼接成去重 key，相同组合只保留最高分。
-     *
-     * @return 当 includeScore=true 时返回 `List<Map<String,Object>>`（含 `score`），
-     *         否则返回 `List<Map<String,String>>`。
+     * 全量同步：清空当前内存向量，再扫描 rag.docs.path 下的所有支持文件并入库。
+     * 同步模式下 CSV 也走文本路径（不分列）。
+     * 同步完成后重建文档索引。
      */
-    public List<?> match(String query, int topK, float minScore,
-                         boolean includeScore, List<String> columns) throws Exception {
+    public SyncResult syncAll() {
+        long start = System.currentTimeMillis();
+        int scanned = 0, ingested = 0, failed = 0;
+        List<DocumentRepository.ScannedFile> files;
+        try {
+            files = docRepo.scan();
+        } catch (IOException e) {
+            log.error("syncAll: failed to scan documents", e);
+            return new SyncResult(0, 0, 0, 0, store.size(),
+                    System.currentTimeMillis() - start);
+        }
+        scanned = files.size();
+
+        store.clear();
+        documentIndex.clear();
+
+        for (DocumentRepository.ScannedFile sf : files) {
+            // 跳过 index.json 文件本身
+            if ("index.json".equals(sf.filename())) {
+                log.info("syncAll: skipping index.json");
+                continue;
+            }
+            long fileStart = System.currentTimeMillis();
+            try {
+                byte[] bytes = docRepo.read(sf);
+                ingestFromBytes(sf.filename(), sf.filename(), bytes,
+                        Collections.emptyList(), /*syncMode=*/ true);
+                ingested++;
+                long fileMs = System.currentTimeMillis() - fileStart;
+                log.info("syncAll: file='{}' ingested in {}ms", sf.filename(), fileMs);
+            } catch (Exception e) {
+                long fileMs = System.currentTimeMillis() - fileStart;
+                log.error("syncAll: failed to ingest file='{}' after {}ms", sf.filename(), fileMs, e);
+                failed++;
+            }
+        }
+
+        // 同步后重建索引（从当前的 documents）
+        rebuildIndex();
+
+        long duration = System.currentTimeMillis() - start;
+        log.info("Sync done: scanned={} ingested={} failed={} totalVectors={} duration={}ms",
+                scanned, ingested, failed, store.size(), duration);
+        return new SyncResult(scanned, ingested, 0, failed, store.size(), duration);
+    }
+
+    /** 从当前 VectorStore 重建文档索引 */
+    private void rebuildIndex() {
+        documentIndex.clear();
+        List<com.example.rag.index.DocumentIndex.BatchAddEntry> entries = new ArrayList<>();
+        for (Document doc : store.listDocuments()) {
+            // 从 storagePath 提取文件名
+            String fileName = extractFileName(doc.getPath());
+            com.example.rag.index.DocumentIndex.BatchAddEntry entry = new com.example.rag.index.DocumentIndex.BatchAddEntry();
+            entry.docId = doc.getDocId();
+            entry.docName = doc.getFilename();
+            entry.fileName = fileName;
+            entry.size = doc.getSize();
+            entry.chunks = doc.getChunks();
+            entry.createdAt = doc.getCreatedAt();
+            entries.add(entry);
+        }
+        documentIndex.addAll(entries);
+        log.info("Rebuilt index with {} entries", documentIndex.list().size());
+    }
+
+    /** 从存储路径提取文件名 */
+    private String extractFileName(String storagePath) {
+        if (storagePath == null) return "";
+        if (storagePath.startsWith("classpath:")) {
+            // classpath:docs/data-raw/xxx.txt
+            int lastSlash = storagePath.lastIndexOf('/');
+            return lastSlash >= 0 ? storagePath.substring(lastSlash + 1) : storagePath;
+        } else {
+            // 绝对路径 /path/to/docs/data-raw/xxx.txt
+            return Paths.get(storagePath).getFileName().toString();
+        }
+    }
+
+    // ----- 删除 -----
+
+    /** 按 docId 删除向量与原始文件。classpath 模式下不删文件（仅清空向量条目）。 */
+    public DeleteResult deleteDocument(String docId) throws IOException {
+        if (docId == null || docId.isBlank()) {
+            throw new IllegalArgumentException("docId is required");
+        }
+        Document doc = store.getDocument(docId);
+        if (doc == null) {
+            throw new DocumentNotFoundException(docId);
+        }
+        int removed = store.removeByDocId(docId);
+        boolean fileDeleted = false;
+        if (!docRepo.isClasspath() && doc.getPath() != null) {
+            Path p = Paths.get(doc.getPath()).getFileName();
+            if (p != null) {
+                fileDeleted = docRepo.delete(p.toString());
+            }
+        }
+        // 从索引中删除
+        documentIndex.remove(docId);
+        log.info("Deleted docId={} name='{}' removedVectors={} fileDeleted={}",
+                docId, doc.getFilename(), removed, fileDeleted);
+        return new DeleteResult(docId, doc.getFilename(), removed, fileDeleted, store.size());
+    }
+
+    // ----- 检索 -----
+
+    /**
+     * 通用化检索。`columns` 必须非空。
+     */
+    public List<MatchEntry> match(String query, int topK, float minScore,
+                                  boolean includeScore, List<String> columns, String docId) throws Exception {
         if (columns == null || columns.isEmpty()) {
             throw new IllegalArgumentException(
                     "Match requires `columns` to be non-empty (caller must declare which columns to return).");
@@ -165,7 +343,13 @@ public class RagService {
         float[] q = embedder.embed(query);
         List<VectorStore.Hit> raw = store.search(q, Integer.MAX_VALUE);
 
-        // 过滤：必须有 columns 且 columns 包含请求的所有列
+        // 如果指定了 docId，过滤结果
+        if (docId != null && !docId.isBlank()) {
+            raw = raw.stream()
+                    .filter(h -> docId.equals(h.sourceDocId))
+                    .collect(java.util.stream.Collectors.toList());
+        }
+
         List<VectorStore.Hit> filtered = new ArrayList<>();
         for (VectorStore.Hit h : raw) {
             if (h.columns == null || h.columns.isEmpty()) continue;
@@ -177,7 +361,6 @@ public class RagService {
             if (allPresent) filtered.add(h);
         }
 
-        // 按 columns 内容去重
         Map<String, VectorStore.Hit> dedup = new LinkedHashMap<>();
         for (VectorStore.Hit h : filtered) {
             String key = dedupKey(h, columns);
@@ -187,43 +370,69 @@ public class RagService {
             }
         }
 
-        // 排序 + 截断
         List<VectorStore.Hit> sorted = new ArrayList<>(dedup.values());
         sorted.sort((a, b) -> Float.compare(b.score, a.score));
         if (sorted.size() > topK) sorted = sorted.subList(0, topK);
 
-        // 组装响应
-        List<Map<String, Object>> out = new ArrayList<>(sorted.size());
+        List<MatchEntry> out = new ArrayList<>(sorted.size());
         for (VectorStore.Hit h : sorted) {
-            Map<String, Object> m = new LinkedHashMap<>();
+            Map<String, String> cols = new LinkedHashMap<>();
             for (String col : columns) {
-                m.put(col, h.columns.get(col));
+                cols.put(col, h.columns.get(col));
             }
-            if (includeScore) m.put("score", h.score);
-            out.add(m);
+            out.add(new MatchEntry(cols, includeScore ? h.score : null));
         }
         return out;
     }
 
-    private String dedupKey(VectorStore.Hit h, List<String> columns) {
-        return columns.stream()
-                .map(c -> c + "=" + h.columns.get(c))
-                .collect(Collectors.joining(";"));
+    /** 兼容旧调用方：无 docId 过滤。 */
+    public List<MatchEntry> match(String query, int topK, float minScore,
+                                  boolean includeScore, List<String> columns) throws Exception {
+        return match(query, topK, minScore, includeScore, columns, null);
     }
+
+    private String dedupKey(VectorStore.Hit h, List<String> columns) {
+        StringBuilder sb = new StringBuilder();
+        for (String c : columns) {
+            if (sb.length() > 0) sb.append(';');
+            sb.append(c).append('=').append(h.columns.get(c));
+        }
+        return sb.toString();
+    }
+
+    /** 旧版相似度检索（文本路径）。支持按 docId 过滤。 */
+    public List<VectorStore.Hit> search(String query, int topK, String docId) throws Exception {
+        float[] q = embedder.embed(query);
+        List<VectorStore.Hit> raw = store.search(q, Integer.MAX_VALUE);
+
+        // 如果指定了 docId，过滤结果
+        if (docId != null && !docId.isBlank()) {
+            raw = raw.stream()
+                    .filter(h -> docId.equals(h.sourceDocId))
+                    .collect(java.util.stream.Collectors.toList());
+        }
+
+        // 限制返回数量
+        if (raw.size() > topK) {
+            raw = raw.subList(0, topK);
+        }
+        return raw;
+    }
+
+    /** 兼容旧调用方：无 docId 过滤。 */
+    public List<VectorStore.Hit> search(String query, int topK) throws Exception {
+        return search(query, topK, null);
+    }
+
+    // ----- 概览 -----
 
     public int totalVectors() { return store.size(); }
 
-    /**
-     * 旧版相似度检索入口（不要求 columns）。
-     * 保留向后兼容：纯文本入库的 Entry 也会被返回（其 columns 为 emptyMap）。
-     * CSV 入库的 Entry 也会返回，columns 字段自然带出。
-     */
-    public List<VectorStore.Hit> search(String query, int topK) throws Exception {
-        float[] q = embedder.embed(query);
-        return store.search(q, topK);
-    }
+    public List<Document> listDocuments() { return store.listDocuments(); }
 
-    public record IngestResult(String docId, String filename, int chunks, int totalVectors) {}
+    public Document getDocument(String docId) { return store.getDocument(docId); }
+
+    // ----- 工具 -----
 
     /**
      * 辅助：把逗号分隔字符串拆为 List，trim + 去重，保留首次出现顺序。
@@ -243,4 +452,15 @@ public class RagService {
         if (filename == null) return false;
         return filename.toLowerCase().endsWith(".csv");
     }
+
+    // ----- 内部值对象 -----
+
+    public record IngestResult(String docId, String name, int chunks, long totalVectors, long durationMs) {}
+    public record DeleteResult(String docId, String name, int removedVectors,
+                               boolean fileDeleted, long totalVectors) {}
+    public record SyncResult(int scanned, int ingested, int removed, int failed,
+                             long totalVectors, long durationMs) {}
+
+    /** 匹配单条结果。score 为 null 表示不返回分数。 */
+    public record MatchEntry(Map<String, String> columns, Float score) {}
 }

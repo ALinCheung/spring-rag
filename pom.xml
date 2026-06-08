@@ -28,6 +28,13 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- Lombok：减少样板代码 -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- ONNX Runtime -->
         <dependency>
             <groupId>com.microsoft.onnxruntime</groupId>
@@ -49,6 +56,12 @@
             <version>1.11.0</version>
         </dependency>
 
+        <!-- Jackson JSR310 用于序列化 java.time 类型 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -61,6 +74,17 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>17</source>
+                    <target>17</target>
+                    <release>17</release>
+                    <fork>true</fork>
+                </configuration>
             </plugin>
         </plugins>
     </build>

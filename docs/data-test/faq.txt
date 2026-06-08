@@ -1,0 +1,25 @@
+Spring RAG 常见问题（FAQ）
+
+Q1: What is RAG and why do I need it?
+RAG (Retrieval-Augmented Generation) combines a vector search index with a language model. The retriever finds relevant context from your private documents, and the generator uses that context to answer questions accurately, reducing hallucinations.
+什么是 RAG，为什么需要它？RAG（检索增强生成）把向量检索与语言模型结合：检索器从你的私有文档中找出相关上下文，生成器基于这些上下文准确作答，从而显著减少大模型"一本正经地胡说八道"的问题。
+
+Q2: Which embedding model is used by this project?
+This project ships with bge-small-zh-v1.5 (about 90MB ONNX). It produces 512-dimensional L2-normalized vectors and is well-suited for Chinese and English short text. The model runs locally via ONNX Runtime, so no data leaves your machine.
+本项目使用什么 embedding 模型？默认自带 bge-small-zh-v1.5（约 90MB 的 ONNX），产出 512 维 L2 归一化向量，对中英文短文表现良好。模型通过 ONNX Runtime 在本地运行，数据完全不出本机。
+
+Q3: How is the document chunked?
+A sliding-window chunker splits on sentence punctuation when possible, then packs pieces of roughly rag.chunk.size characters with rag.chunk.overlap characters carry-over for context continuity. Character-based chunking is a deliberate choice that works for both Chinese and English without pulling in language-specific tokenizers.
+文档如何切分？采用滑动窗口切分器：优先在句末标点处断开，再按 rag.chunk.size 个字符打包成块，相邻块之间保留 rag.chunk.overlap 个字符作为上下文重叠。基于字符的切分是有意为之——它对中英文都适用，不必引入语言相关的分词器。
+
+Q4: How can I switch to a different ONNX model?
+Set rag.model.path in application.yml to an absolute directory that contains both model.onnx and tokenizer.json. Restart the service. The startup validator will refuse to boot if either file is missing.
+如何切换到其他 ONNX 模型？把 application.yml 里的 rag.model.path 改成一个同时包含 model.onnx 与 tokenizer.json 的绝对目录，然后重启服务。启动校验器在缺失文件时会拒绝启动并返回 503。
+
+Q5: Why are vectors stored in memory?
+This is a v1 demo. In-memory storage keeps the project zero-dependency and lets you focus on the embedding + retrieval pipeline. When you need to scale beyond a few hundred thousand vectors, replace VectorStore with HNSW or Faiss — the abstraction already lives behind a single class.
+为什么把向量存在内存里？这是 v1 demo。进程内存储让项目零外部依赖，便于聚焦 embedding 与检索流程。当你需要扩展到几十万向量以上时，可把 VectorStore 替换为 HNSW 或 Faiss——抽象已经收敛到单一类里。
+
+Q6: How do I trigger a manual full re-index?
+Hit POST /api/rag/sync. It clears the in-memory index, scans rag.docs.path, and re-ingests everything. The startup and scheduled tasks do the same. Concurrent syncs are blocked — the second caller gets HTTP 409.
+如何手动触发全量重建？调用 POST /api/rag/sync。它会清空内存索引，扫描 rag.docs.path，再把全部文件重新入库。启动同步与定时同步逻辑相同。并发同步会被拒绝，第二次调用者会收到 HTTP 409。
