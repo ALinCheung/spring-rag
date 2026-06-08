@@ -20,6 +20,7 @@
     <properties>
         <java.version>17</java.version>
         <onnxruntime.version>1.18.0</onnxruntime.version>
+        <main>com.example.rag.RagApplication</main>
     </properties>
 
     <dependencies>
@@ -85,6 +86,100 @@
                     <release>17</release>
                     <fork>true</fork>
                 </configuration>
+            </plugin>
+            <!-- 打包插件 -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>appassembler-maven-plugin</artifactId>
+                <version>1.10</version>
+                <configuration>
+                    <repositoryLayout>flat</repositoryLayout>
+                    <repositoryName>lib</repositoryName>
+                    <configurationDirectory>conf</configurationDirectory>
+                    <configurationSourceDirectory>src/main/config</configurationSourceDirectory>
+                    <copyConfigurationDirectory>true</copyConfigurationDirectory>
+                    <filterConfigurationDirectory>true</filterConfigurationDirectory>
+                    <encoding>UTF-8</encoding>
+                    <useWildcardClassPath>true</useWildcardClassPath>
+                    <logsDirectory>logs</logsDirectory>
+                    <defaultJvmSettings>
+                        <initialMemorySize>128M</initialMemorySize>
+                        <extraArguments>
+                            <!-- 容器环境下需要（java8u131+） -->
+                            <!--   <extraArgument>-XX:+UnlockExperimentalVMOptions</extraArgument>
+                                <extraArgument>-XX:+UseCGroupMemoryLimitForHeap</extraArgument> -->
+
+                            <extraArgument>-XX:NewRatio=4</extraArgument>
+                            <extraArgument>-XX:SurvivorRatio=4</extraArgument>
+                            <extraArgument>-Xss1M</extraArgument>
+                            <extraArgument>-server</extraArgument>
+                        </extraArguments>
+                        <systemProperties>
+                            <systemProperty>java.security.policy=conf/policy.all</systemProperty>
+                        </systemProperties>
+                    </defaultJvmSettings>
+                    <daemons>
+                        <daemon>
+                            <id>app</id>
+                            <wrapperMainClass>org.tanukisoftware.wrapper.WrapperSimpleApp</wrapperMainClass>
+                            <mainClass>${main}</mainClass>
+                            <platforms>
+                                <platform>jsw</platform>
+                            </platforms>
+                            <generatorConfigurations>
+                                <generatorConfiguration>
+                                    <generator>jsw</generator>
+                                    <includes>
+                                        <include>linux-x86-64</include>
+                                        <include>windows-x86-64</include>
+                                        <include>macosx-universal-64</include>
+                                    </includes>
+                                    <configuration>
+                                        <property>
+                                            <name>configuration.directory.in.classpath.first</name>
+                                            <value>conf</value>
+                                        </property>
+                                        <property>
+                                            <name>wrapper.logfile</name>
+                                            <value>logs/wrapper.log</value>
+                                        </property>
+                                        <property>
+                                            <name>wrapper.console.title</name>
+                                            <value>Application</value>
+                                        </property>
+                                    </configuration>
+                                </generatorConfiguration>
+                            </generatorConfigurations>
+                        </daemon>
+                    </daemons>
+                </configuration>
+                <executions>
+                    <execution>
+                        <inherited>true</inherited>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>generate-daemons</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <configuration>
+                    <appendAssemblyId>false</appendAssemblyId>
+                    <finalName>${project.name}</finalName>
+                    <descriptors>
+                        <descriptor>src/main/assembly/bin.xml</descriptor>
+                    </descriptors>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

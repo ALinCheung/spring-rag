@@ -2,6 +2,7 @@ package com.example.rag.controller;
 
 import com.example.rag.exception.DocumentConflictException;
 import com.example.rag.exception.DocumentNotFoundException;
+import com.example.rag.exception.SyncConflictException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -50,6 +51,12 @@ public class GlobalExceptionHandler {
                 .body(Map.of("error", e.getMessage()));
     }
 
+    @ExceptionHandler(SyncConflictException.class)
+    public ResponseEntity<?> handleSyncConflict(SyncConflictException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(Map.of("error", e.getMessage()));
+    }
+
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<?> handleMissingParam(MissingServletRequestParameterException e) {
         return badRequest("缺少必传参数: " + e.getParameterName());
@@ -85,11 +92,9 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<?> handleIllegalState(IllegalStateException e) {
+        // 模型未就绪 / 同步失败 / 文档库配置错误等 → 503
         log.error("Service unavailable: {}", e.getMessage(), e);
-        HttpStatus status = e.getMessage() != null && e.getMessage().contains("正在执行")
-                ? HttpStatus.CONFLICT
-                : HttpStatus.SERVICE_UNAVAILABLE;
-        return ResponseEntity.status(status)
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .body(Map.of("error", e.getMessage() == null ? "service unavailable" : e.getMessage()));
     }
 

@@ -34,7 +34,7 @@ import java.util.stream.Collectors;
 
 /**
  * 业务编排：
- *  - {@link #ingest(MultipartFile, List)}：上传文件落盘 + 向量化入库
+ *  - {@link #ingest(MultipartFile, List, String)}：上传文件落盘 + 向量化入库（主入口）
  *  - {@link #syncAll()}：扫描文档目录，全量覆盖当前内存向量
  *  - {@link #deleteDocument(String)}：按 docId 删向量 + 删原始文件
  *  - {@link #search} / {@link #match}：检索

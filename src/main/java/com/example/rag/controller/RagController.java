@@ -9,6 +9,7 @@ import com.example.rag.dto.SearchHitResponse;
 import com.example.rag.dto.SearchResponse;
 import com.example.rag.dto.StatsResponse;
 import com.example.rag.dto.SyncResponse;
+import com.example.rag.exception.SyncConflictException;
 import com.example.rag.index.DocumentIndex;
 import com.example.rag.model.Document;
 import com.example.rag.service.RagService;
@@ -52,7 +53,7 @@ public class RagController {
                                          defaultValue = "column1,column2") String columns,
                                  @RequestParam(value = "name", required = false) String name) throws Exception {
         validateFile(file);
-        validateName(name);
+        // name 的唯一性与路径安全校验由 RagService.ingest 负责
         List<String> columnList = RagService.parseColumns(columns);
         RagService.IngestResult res = ragService.ingest(file, columnList, name);
         return new IngestResponse(res.docId(), res.name(), columnList,
@@ -129,13 +130,13 @@ public class RagController {
 
     /**
      * 手动触发全量同步：清空当前内存向量，再扫描 rag.docs.path 重新入库。
-     * 若已有同步任务在跑，将抛 409。
+     * 若已有同步任务在跑，将抛 SyncConflictException（→ 409）。
      */
     @PostMapping("/sync")
     public SyncResponse sync() {
         RagService.SyncResult r = syncScheduler.triggerSync("manual-http");
         if (r == null) {
-            throw new IllegalStateException("已有同步任务正在执行，请稍后重试");
+            throw new SyncConflictException();
         }
         return new SyncResponse(r.scanned(), r.ingested(), r.removed(), r.failed(),
                 r.totalVectors(), r.durationMs());
@@ -176,11 +177,5 @@ public class RagController {
                     "`minScore` must be between " + MIN_SCORE_LOWER + " and " + MIN_SCORE_UPPER
                             + " (got " + minScore + ")");
         }
-    }
-
-    /** 校验 name 参数（可选，非空即可）。 */
-    private static void validateName(String name) {
-        // name 可以是任意非空字符串，不需要扩展名限制
-        // 唯一性校验和路径安全检查在 Service 层处理
     }
 }
