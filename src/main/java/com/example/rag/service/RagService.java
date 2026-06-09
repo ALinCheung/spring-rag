@@ -261,10 +261,10 @@ public class RagService {
     // ----- 检索 -----
 
     /**
-     * 通用化检索。`columns` 必须非空。
+     * 通用化检索。`columns` 必须非空,score 始终返回。
      */
     public List<MatchEntry> match(String query, int topK, float minScore,
-                                  boolean includeScore, List<String> columns, String docId) throws Exception {
+                                  List<String> columns, String docId) throws Exception {
         if (columns == null || columns.isEmpty()) {
             throw new IllegalArgumentException(
                     "Match requires `columns` to be non-empty (caller must declare which columns to return).");
@@ -309,15 +309,15 @@ public class RagService {
             for (String col : columns) {
                 cols.put(col, h.columns.get(col));
             }
-            out.add(new MatchEntry(cols, includeScore ? h.score : null));
+            out.add(new MatchEntry(cols, h.score));
         }
         return out;
     }
 
     /** 兼容旧调用方：无 docId 过滤。 */
     public List<MatchEntry> match(String query, int topK, float minScore,
-                                  boolean includeScore, List<String> columns) throws Exception {
-        return match(query, topK, minScore, includeScore, columns, null);
+                                  List<String> columns) throws Exception {
+        return match(query, topK, minScore, columns, null);
     }
 
     private String dedupKey(VectorStore.Hit h, List<String> columns) {
@@ -329,28 +329,26 @@ public class RagService {
         return sb.toString();
     }
 
-    /** 旧版相似度检索（文本路径）。支持按 docId 过滤。 */
-    public List<VectorStore.Hit> search(String query, int topK, String docId) throws Exception {
+    /** 相似度检索:按 minScore 过滤 + 按 docId 过滤 + 截取 topK。不去重、不投影列。 */
+    public List<VectorStore.Hit> search(String query, int topK, float minScore, String docId) throws Exception {
         float[] q = embedder.embed(query);
         List<VectorStore.Hit> raw = store.search(q, Integer.MAX_VALUE);
 
-        // 如果指定了 docId，过滤结果
         if (docId != null && !docId.isBlank()) {
             raw = raw.stream()
                     .filter(h -> docId.equals(h.sourceDocId))
                     .collect(java.util.stream.Collectors.toList());
         }
-
-        // 限制返回数量
+        if (minScore > Float.NEGATIVE_INFINITY) {
+            float threshold = minScore;
+            raw = raw.stream()
+                    .filter(h -> h.score >= threshold)
+                    .collect(java.util.stream.Collectors.toList());
+        }
         if (raw.size() > topK) {
             raw = raw.subList(0, topK);
         }
         return raw;
-    }
-
-    /** 兼容旧调用方：无 docId 过滤。 */
-    public List<VectorStore.Hit> search(String query, int topK) throws Exception {
-        return search(query, topK, null);
     }
 
     // ----- 概览 -----
@@ -385,6 +383,6 @@ public class RagService {
     public record SyncResult(int scanned, int ingested, int removed, int failed,
                              long totalVectors, long durationMs) {}
 
-    /** 匹配单条结果。score 为 null 表示不返回分数。 */
-    public record MatchEntry(Map<String, String> columns, Float score) {}
+    /** 匹配单条结果。score 始终返回。 */
+    public record MatchEntry(Map<String, String> columns, float score) {}
 }

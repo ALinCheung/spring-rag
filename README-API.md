@@ -17,19 +17,25 @@
 | `name`    | 否   | 原始文件名   | 自定义文档名称（任意非空字符串）。非空时用作 {@code Document.filename}，并校验与现有文档名称不重复（409）；未传时使用上传文件的原始文件名（不做去重） |
 
 ### `GET /api/rag/search`
-| 参数   | 必传 | 默认 | 范围    | 说明 |
-|--------|------|------|---------|------|
-| `q`    | 是   | -    | 非空    | 查询文本 |
-| `topK` | 否   | 5    | 1..100  | 返回前 K 个 |
+通用化检索端点。根据 `columns` 是否传值走两种模式:
 
-### `GET /api/rag/match`
-| 参数           | 必传 | 默认              | 范围       | 说明 |
-|----------------|------|-------------------|------------|------|
-| `q`            | 是   | -                 | 非空       | 查询文本 |
-| `columns`      | 是   | `column1,column2`| 非空       | 响应中每个 match 包含的列 |
-| `topK`         | 否   | 5                 | 1..100     | 返回前 K 个 |
-| `minScore`     | 否   | 0.0               | -1.0..1.0  | 最低分阈值 |
-| `includeScore` | 否   | false             | -          | 是否在 match 中包含 `score` 字段 |
+**模式一:全文检索**(不传 `columns` 或 `columns=` 空)
+- 响应:`{query, topK, totalVectors, results: [{id, sourceDocId, score, text, columns}]}`
+- 每个 hit 含 `text` 与所有 metadata 列;`score` 始终返回;不去重、不列投影
+- `minScore` 默认 `0.0`(不过滤)
+
+**模式二:列化匹配**(`columns=id,name,...` 非空)
+- 响应:`{query, columns, topK, minScore, totalVectors, matches: [{columns, score}]}`
+- 每个 match **不含** `text`,只含请求的列;按 `columns` 组合 key dedup;`score` 始终返回
+- `minScore` 默认 `0.0`
+
+| 参数           | 必传 | 默认 | 范围       | 说明 |
+|----------------|------|------|------------|------|
+| `q`            | 是   | -    | 非空       | 查询文本 |
+| `topK`         | 否   | 5    | 1..100     | 返回前 K 个 |
+| `minScore`     | 否   | 0.0  | -1.0..1.0  | 最低分阈值,两个模式都生效 |
+| `columns`      | 否   | -    | 模式二必传 | 逗号分隔列名。空 → 模式一;非空 → 模式二 |
+| `docId`        | 否   | -    | -          | 按 docId 过滤候选向量 |
 
 ### `GET /api/rag/stats`
 返回当前向量库的概览：总向量数、文档数、文档列表（docId / name / size / chunks / createdAt）。

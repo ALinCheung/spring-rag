@@ -61,19 +61,34 @@ public class RagController {
     }
 
     /**
-     * 旧版相似度检索（文本路径），每个 hit 多了 `columns` 字段（CSV 行才有）。
+     * 相似度检索。
+     *  - columns 为空 → 全文检索模式：返 SearchResponse（含 text、所有 columns、score 必出）
+     *  - columns 非空 → 列化匹配模式：返 MatchResponse（按列 dedup、只含指定列、score 必出）
      */
     @GetMapping("/search")
-    public SearchResponse search(@RequestParam("q") String query,
-                                 @RequestParam(value = "topK", defaultValue = "5") int topK,
-                                 @RequestParam(value = "docId", required = false) String docId) throws Exception {
+    public Object search(@RequestParam("q") String query,
+                         @RequestParam(value = "topK", defaultValue = "5") int topK,
+                         @RequestParam(value = "minScore", defaultValue = "0.0") float minScore,
+                         @RequestParam(value = "columns", required = false) String columns,
+                         @RequestParam(value = "docId", required = false) String docId) throws Exception {
         validateQuery(query);
         validateTopK(topK);
-        List<VectorStore.Hit> hits = ragService.search(query, topK, docId);
-        List<SearchHitResponse> results = hits.stream()
-                .map(SearchHitResponse::from)
-                .collect(Collectors.toList());
-        return new SearchResponse(query, topK, ragService.totalVectors(), results);
+        validateMinScore(minScore);
+        long total = ragService.totalVectors();
+        List<String> columnList = RagService.parseColumns(columns);
+        if (columnList.isEmpty()) {
+            List<VectorStore.Hit> hits = ragService.search(query, topK, minScore, docId);
+            List<SearchHitResponse> results = hits.stream()
+                    .map(SearchHitResponse::from)
+                    .collect(Collectors.toList());
+            return new SearchResponse(query, topK, total, results);
+        }
+        List<RagService.MatchEntry> raw = ragService.match(query, topK, minScore, columnList, docId);
+        List<MatchEntryResponse> matches = new ArrayList<>(raw.size());
+        for (RagService.MatchEntry me : raw) {
+            matches.add(new MatchEntryResponse(me.columns(), me.score()));
+        }
+        return new MatchResponse(query, columnList, topK, minScore, total, matches);
     }
 
     @GetMapping("/stats")
@@ -86,33 +101,6 @@ public class RagController {
                 })
                 .collect(Collectors.toList());
         return new StatsResponse(ragService.totalVectors(), docInfos.size(), docInfos);
-    }
-
-    /**
-     * 通用化匹配端点：返回每个 match 包含请求方声明的 columns 列表对应键值。
-     */
-    @GetMapping("/match")
-    public MatchResponse match(@RequestParam("q") String query,
-                               @RequestParam(value = "columns",
-                                       defaultValue = "column1,column2") String columns,
-                               @RequestParam(value = "topK", defaultValue = "5") int topK,
-                               @RequestParam(value = "minScore", defaultValue = "0.0") float minScore,
-                               @RequestParam(value = "includeScore", defaultValue = "false") boolean includeScore,
-                               @RequestParam(value = "docId", required = false) String docId) throws Exception {
-        validateQuery(query);
-        validateTopK(topK);
-        validateMinScore(minScore);
-        List<String> columnList = RagService.parseColumns(columns);
-        if (columnList.isEmpty()) {
-            throw new IllegalArgumentException("`columns` must be a non-empty comma-separated list");
-        }
-        List<RagService.MatchEntry> raw = ragService.match(query, topK, minScore, includeScore, columnList, docId);
-        List<MatchEntryResponse> matches = new ArrayList<>(raw.size());
-        for (RagService.MatchEntry me : raw) {
-            matches.add(new MatchEntryResponse(me.columns(), me.score()));
-        }
-        return new MatchResponse(query, columnList, topK, minScore,
-                ragService.totalVectors(), matches);
     }
 
     /**
