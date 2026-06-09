@@ -29,8 +29,8 @@ rag:
     # 注意：目录中必须同时包含 model.onnx 与 tokenizer.json。
     path: classpath:model/bge-small-zh-v1.5
   chunk:
-    size: 200
-    overlap: 30
+    size: 400
+    overlap: 50
   docs:
     # 原始文档存放目录：上传的文件落地此处，启动/定时任务也从此处读取。
     # 默认项目根目录下的 docs/data-raw；切换为外部目录时改为绝对路径。

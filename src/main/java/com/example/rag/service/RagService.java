@@ -1,5 +1,7 @@
 package com.example.rag.service;
 
+import com.example.rag.chunk.Chunk;
+import com.example.rag.chunk.ChunkerRouter;
 import com.example.rag.embedding.OnnxBgeEmbeddingService;
 import com.example.rag.exception.DocumentConflictException;
 import com.example.rag.exception.DocumentNotFoundException;
@@ -7,20 +9,12 @@ import com.example.rag.index.DocumentIndex;
 import com.example.rag.model.Document;
 import com.example.rag.store.DocumentRepository;
 import com.example.rag.store.VectorStore;
-import org.apache.commons.csv.CSVFormat;
-import org.apache.commons.csv.CSVParser;
-import org.apache.commons.csv.CSVRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.Reader;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -45,15 +39,15 @@ public class RagService {
     private static final Logger log = LoggerFactory.getLogger(RagService.class);
 
     private final OnnxBgeEmbeddingService embedder;
-    private final TextChunker chunker;
+    private final ChunkerRouter chunkerRouter;
     private final VectorStore store;
     private final DocumentRepository docRepo;
     private final DocumentIndex documentIndex;
 
-    public RagService(OnnxBgeEmbeddingService embedder, TextChunker chunker,
+    public RagService(OnnxBgeEmbeddingService embedder, ChunkerRouter chunkerRouter,
                       VectorStore store, DocumentRepository docRepo, DocumentIndex documentIndex) {
         this.embedder = embedder;
-        this.chunker = chunker;
+        this.chunkerRouter = chunkerRouter;
         this.store = store;
         this.docRepo = docRepo;
         this.documentIndex = documentIndex;
@@ -78,6 +72,11 @@ public class RagService {
         if (original == null || original.isBlank()) {
             throw new IllegalArgumentException("file must have a valid filename");
         }
+        // CSV 上传路径要求 columns 非空,避免误把整张表向量化
+        if (original.toLowerCase().endsWith(".csv") && (columns == null || columns.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "CSV ingest requires `columns` to be non-empty (caller must declare which CSV columns to ingest).");
+        }
         String docName = resolveDocName(name, original);
         // 使用 documentIndex 检查文档名称是否重复
         if (name != null && !name.trim().isEmpty() && documentIndex.existsByDocName(docName)) {
@@ -85,7 +84,8 @@ public class RagService {
         }
         DocumentRepository.StoredFile stored = docRepo.save(file);
         byte[] bytes = Files.readAllBytes(stored.path());
-        return ingestFromBytes(stored.storedName(), docName, bytes, columns, /*syncMode=*/ false);
+        return ingestFromBytes(stored.storedName(), docName, bytes,
+                columns == null ? Collections.emptyList() : columns);
     }
 
     /** 兼容旧调用方：未指定 name，等价于 ingest(file, columns, null)。 */
@@ -112,116 +112,46 @@ public class RagService {
     }
 
     /**
-     * 把字节内容向量化入库。
+     * 把字节内容向量化入库。按文件名后缀路由到对应 Chunker:
+     *   .md  -> MarkdownChunker, .csv -> CsvRowChunker, 其他 -> SlidingWindowChunker
+     * CSV 在上传路径上要求 columns 非空;同步路径上传 columns 为空,CsvRowChunker 会全列入库。
      *
-     * @param storedName 落盘后的文件名（带 UUID 前缀）；同步模式下与 originalName 相同
+     * @param storedName   落盘后的文件名（带 UUID 前缀）；同步模式下与 originalName 相同
      * @param originalName 用户可见的原始文件名（用于 Document.filename）
-     * @param bytes      文件内容
-     * @param columns    CSV 模式下声明的列；同步模式下传空列表，CSV 走文本路径
-     * @param syncMode   是否同步模式：true 时无论后缀都按文本处理
+     * @param bytes        文件内容
+     * @param columns      CSV 模式下声明要入库的列;同步模式传空列表
      */
     private IngestResult ingestFromBytes(String storedName, String originalName, byte[] bytes,
-                                         List<String> columns, boolean syncMode) throws Exception {
+                                         List<String> columns) throws Exception {
         long startNs = System.nanoTime();
         String docId = store.newId();
-        List<VectorStore.Entry> entries = new ArrayList<>();
-        int produced;
-        boolean csv = !syncMode && looksLikeCsv(originalName);
-        if (csv) {
-            produced = ingestCsvBytes(bytes, docId, entries, columns);
-        } else {
-            produced = ingestTextBytes(bytes, docId, entries);
+        List<Chunk> chunks = chunkerRouter.split(originalName, bytes, columns);
+        List<VectorStore.Entry> entries = new ArrayList<>(chunks.size());
+        for (Chunk c : chunks) {
+            float[] vec = embedder.embed(c.text());
+            entries.add(new VectorStore.Entry(store.newId(), docId, c.text(), vec, c.columns()));
         }
         String storagePath = docRepo.isClasspath()
                 ? "classpath:" + docRepo.getClasspathRoot() + "/" + storedName
                 : docRepo.getFsRoot().resolve(storedName).toString();
         Document doc = new Document(docId, originalName, storagePath,
-                bytes.length, produced, Instant.now());
+                bytes.length, entries.size(), Instant.now());
         store.addDocument(doc, entries);
         // 更新文档索引（非同步模式）
-        if (!syncMode) {
-            documentIndex.add(docId, originalName, storedName, bytes.length, produced);
+        if (!columns.isEmpty()) {
+            documentIndex.add(docId, originalName, storedName, bytes.length, entries.size());
         }
         long durationMs = (System.nanoTime() - startNs) / 1_000_000L;
-        log.info("Ingested docId={} name='{}' kind={} bytes={} chunks={} totalVectors={} duration={}ms",
-                docId, originalName, csv ? "csv" : "text", bytes.length,
-                produced, store.size(), durationMs);
-        return new IngestResult(docId, originalName, produced, store.size(), durationMs);
-    }
-
-    private int ingestTextBytes(byte[] bytes, String docId,
-                                List<VectorStore.Entry> entries) throws Exception {
-        String text = new String(bytes, StandardCharsets.UTF_8);
-        List<String> chunks = chunker.split(text);
-        for (String chunk : chunks) {
-            float[] vec = embedder.embed(chunk);
-            entries.add(new VectorStore.Entry(store.newId(), docId, chunk, vec, Collections.emptyMap()));
-        }
-        return chunks.size();
-    }
-
-    private int ingestCsvBytes(byte[] bytes, String docId,
-                               List<VectorStore.Entry> entries, List<String> columns) throws Exception {
-        if (columns == null || columns.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "CSV ingest requires `columns` to be non-empty (caller must declare which CSV columns to ingest).");
-        }
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new ByteArrayInputStream(bytes), StandardCharsets.UTF_8));
-             Reader bomStripped = skipUtf8Bom(br);
-             CSVParser parser = CSVFormat.DEFAULT.builder()
-                     .setHeader()
-                     .setSkipHeaderRecord(true)
-                     .setIgnoreEmptyLines(true)
-                     .setIgnoreSurroundingSpaces(true)
-                     .setQuoteMode(CSVFormat.DEFAULT.getQuoteMode())
-                     .build()
-                     .parse(bomStripped)) {
-
-            List<String> headerNames = parser.getHeaderNames();
-            for (String col : columns) {
-                if (!headerNames.contains(col)) {
-                    throw new IllegalArgumentException(
-                            "Column '" + col + "' not found in CSV header: " + headerNames);
-                }
-            }
-
-            int produced = 0;
-            for (CSVRecord rec : parser) {
-                Map<String, String> cols = new LinkedHashMap<>();
-                for (String col : columns) {
-                    String v = rec.isMapped(col) ? rec.get(col) : null;
-                    cols.put(col, v == null ? "" : v);
-                }
-                StringBuilder sb = new StringBuilder();
-                for (String col : columns) {
-                    if (sb.length() > 0) sb.append('\n');
-                    sb.append(col).append(": ").append(cols.get(col));
-                }
-                String text = sb.toString();
-                float[] vec = embedder.embed(text);
-                entries.add(new VectorStore.Entry(store.newId(), docId, text, vec, cols));
-                produced++;
-            }
-            return produced;
-        }
-    }
-
-    /** 跳过 UTF-8 BOM。 */
-    private static Reader skipUtf8Bom(BufferedReader br) throws IOException {
-        br.mark(1);
-        int c = br.read();
-        if (c != 0xFEFF) {
-            br.reset();
-        }
-        return br;
+        log.info("Ingested docId={} name='{}' bytes={} chunks={} totalVectors={} duration={}ms",
+                docId, originalName, bytes.length, entries.size(), store.size(), durationMs);
+        return new IngestResult(docId, originalName, entries.size(), store.size(), durationMs);
     }
 
     // ----- 同步 -----
 
     /**
      * 全量同步：清空当前内存向量，再扫描 rag.docs.path 下的所有支持文件并入库。
-     * 同步模式下 CSV 也走文本路径（不分列）。
+     * 同步路径下 columns 传空,各 Chunker 按自身默认行为处理(CsvRowChunker 全列入库)。
      * 同步完成后重建文档索引。
      */
     public SyncResult syncAll() {
@@ -249,8 +179,7 @@ public class RagService {
             long fileStart = System.currentTimeMillis();
             try {
                 byte[] bytes = docRepo.read(sf);
-                ingestFromBytes(sf.filename(), sf.filename(), bytes,
-                        Collections.emptyList(), /*syncMode=*/ true);
+                ingestFromBytes(sf.filename(), sf.filename(), bytes, Collections.emptyList());
                 ingested++;
                 long fileMs = System.currentTimeMillis() - fileStart;
                 log.info("syncAll: file='{}' ingested in {}ms", sf.filename(), fileMs);
@@ -446,11 +375,6 @@ public class RagService {
             if (!t.isEmpty() && !out.contains(t)) out.add(t);
         }
         return out;
-    }
-
-    private static boolean looksLikeCsv(String filename) {
-        if (filename == null) return false;
-        return filename.toLowerCase().endsWith(".csv");
     }
 
     // ----- 内部值对象 -----
