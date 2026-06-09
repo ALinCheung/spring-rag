@@ -121,3 +121,7 @@ truststore.jks
 
 # Agent 配置
 CLAUDE.md
+.claude/
+.mcp.json
+.code-review-graph/
+openspec/
