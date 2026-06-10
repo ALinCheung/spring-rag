@@ -12,6 +12,7 @@ public class RagProperties {
     private Model model = new Model();
     private Chunk chunk = new Chunk();
     private Docs docs = new Docs();
+    private Store store = new Store();
 
     @Data
     public static class Model {
@@ -35,5 +36,27 @@ public class RagProperties {
         private boolean syncOnStartup = true;
         /** 单文档最大字节数（防止内存爆掉），默认 20MB。 */
         private long maxFileSize = 20L * 1024 * 1024;
+    }
+
+    /** 向量存储后端配置。 */
+    @Data
+    public static class Store {
+        /** 存储类型：memory（进程内）或 milvus（向量数据库）。默认 memory。 */
+        private String type = "memory";
+        /** Milvus 连接配置，仅在 type=milvus 时生效。 */
+        private Milvus milvus = new Milvus();
+    }
+
+    /** Milvus 向量数据库连接配置。 */
+    @Data
+    public static class Milvus {
+        /** Milvus 服务地址。 */
+        private String host = "localhost";
+        /** Milvus 服务端口。 */
+        private int port = 19530;
+        /** 集合名称前缀，实际创建 {prefix}_vectors 和 {prefix}_documents 两个集合。 */
+        private String collection = "rag";
+        /** 向量维度，需与嵌入模型输出一致。bge-small-zh-v1.5 输出 512 维。 */
+        private int dimension = 512;
     }
 }

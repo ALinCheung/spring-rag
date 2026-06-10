@@ -42,6 +42,18 @@ rag:
     sync-on-startup: true
     # 单文档最大字节数（超出将跳过并在日志中告警）。
     max-file-size: 20971520
+  store:
+    # 向量存储后端类型：memory（进程内）或 milvus（向量数据库）。
+    # 默认 memory，切换为 milvus 时需同时配置下方的 rag.store.milvus 段。
+    type: memory
+    # Milvus 向量数据库连接配置（仅在 type=milvus 时生效）。
+    milvus:
+      host: localhost
+      port: 19530
+      # 集合名称前缀，实际创建 rag_vectors 和 rag_documents 两个集合。
+      collection: rag
+      # 向量维度，需与嵌入模型输出一致。bge-small-zh-v1.5 输出 512 维。
+      dimension: 512
 
 logging:
   level:
